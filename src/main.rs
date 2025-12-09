@@ -35,8 +35,6 @@ struct ShaderState {
 
 impl ShaderState {
     fn new(gl: &glow::Context, snippet: &str) -> Result<Self, String> {
-        use glow::HasContext as _;
-
         let (shader_version, precision_line) = if cfg!(target_arch = "wasm32") {
             ("#version 300 es", "precision mediump float;")
         } else {
@@ -57,8 +55,9 @@ impl ShaderState {
             }
         "#
         );
-
-        let fragment_body = format!(
+        // Build both variants up front.
+        // Tweet-style body that writes to `o` and uses FC, r, t.
+        let tweet_fragment_body = format!(
             r#"
             {precision_line}
             uniform vec2 r;
@@ -75,51 +74,107 @@ impl ShaderState {
         "#
         );
 
-        let fragment_shader_source = format!("{shader_version}\n{fragment_body}");
+        let tweet_fragment_source = format!("{shader_version}\n{tweet_fragment_body}");
+
+        // Full GLSL fragment shader variant.
+        let full_fragment_source = if snippet.contains("#version") {
+            snippet.to_owned()
+        } else if precision_line.is_empty() {
+            format!("{shader_version}\n{snippet}")
+        } else {
+            format!("{shader_version}\n{precision_line}\n{snippet}")
+        };
+
+        // Heuristic: if the snippet looks like a complete GLSL shader (has
+        // `void main`, `#version`, or explicit outputs), try full mode first;
+        // otherwise prefer tweet mode first. On failure, fall back to the other
+        // mode.
+        let looks_like_full = {
+            let s = snippet;
+            s.contains("void main")
+                || s.contains("#version")
+                || s.contains("gl_FragColor")
+                || s.contains("out vec4")
+        };
 
         unsafe {
-            let program = gl
-                .create_program()
-                .map_err(|e| format!("Cannot create program: {e}"))?;
-
-            let vs = compile_shader(gl, glow::VERTEX_SHADER, &vertex_shader_source)
-                .map_err(|e| {
-                    gl.delete_program(program);
-                    e
-                })?;
-            let fs = compile_shader(gl, glow::FRAGMENT_SHADER, &fragment_shader_source)
-                .map_err(|e| {
-                    gl.delete_shader(vs);
-                    gl.delete_program(program);
-                    e
-                })?;
-
-            gl.attach_shader(program, vs);
-            gl.attach_shader(program, fs);
-
-            gl.link_program(program);
-            if !gl.get_program_link_status(program) {
-                let log = gl.get_program_info_log(program);
-                gl.delete_shader(vs);
-                gl.delete_shader(fs);
-                gl.delete_program(program);
-                return Err(format!("Program link error:\n{log}"));
+            if looks_like_full {
+                match Self::create_program(gl, &vertex_shader_source, &full_fragment_source) {
+                    Ok(state) => Ok(state),
+                    Err(full_err) => match Self::create_program(
+                        gl,
+                        &vertex_shader_source,
+                        &tweet_fragment_source,
+                    ) {
+                        Ok(state) => Ok(state),
+                        Err(tweet_err) => Err(format!(
+                            "Full GLSL mode failed:\n{}\n\nTweet shader mode also failed:\n{}",
+                            full_err, tweet_err
+                        )),
+                    },
+                }
+            } else {
+                match Self::create_program(gl, &vertex_shader_source, &tweet_fragment_source) {
+                    Ok(state) => Ok(state),
+                    Err(tweet_err) => match Self::create_program(
+                        gl,
+                        &vertex_shader_source,
+                        &full_fragment_source,
+                    ) {
+                        Ok(state) => Ok(state),
+                        Err(full_err) => Err(format!(
+                            "Tweet shader mode failed:\n{}\n\nFull GLSL mode also failed:\n{}",
+                            tweet_err, full_err
+                        )),
+                    },
+                }
             }
+        }
+    }
 
-            gl.detach_shader(program, vs);
-            gl.detach_shader(program, fs);
+    unsafe fn create_program(
+        gl: &glow::Context,
+        vertex_shader_source: &str,
+        fragment_shader_source: &str,
+    ) -> Result<Self, String> {
+        use glow::HasContext as _;
+
+        let program = gl
+            .create_program()
+            .map_err(|e| format!("Cannot create program: {e}"))?;
+
+        let vs = compile_shader(gl, glow::VERTEX_SHADER, vertex_shader_source).map_err(|e| {
+            gl.delete_program(program);
+            e
+        })?;
+        let fs = compile_shader(gl, glow::FRAGMENT_SHADER, fragment_shader_source).map_err(|e| {
+            gl.delete_shader(vs);
+            gl.delete_program(program);
+            e
+        })?;
+
+        gl.attach_shader(program, vs);
+        gl.attach_shader(program, fs);
+
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            let log = gl.get_program_info_log(program);
             gl.delete_shader(vs);
             gl.delete_shader(fs);
-
-            let vertex_array = gl
-                .create_vertex_array()
-                .map_err(|e| format!("Cannot create vertex array: {e}"))?;
-
-            Ok(Self {
-                program,
-                vertex_array,
-            })
+            gl.delete_program(program);
+            return Err(format!("Program link error:\n{log}"));
         }
+
+        gl.detach_shader(program, vs);
+        gl.detach_shader(program, fs);
+        gl.delete_shader(vs);
+        gl.delete_shader(fs);
+
+        let vertex_array = gl
+            .create_vertex_array()
+            .map_err(|e| format!("Cannot create vertex array: {e}"))?;
+
+        Ok(Self { program, vertex_array })
     }
 
     fn paint(
@@ -356,6 +411,12 @@ impl ShadyApp {
         style.visuals = visuals;
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+
+        let mut scroll = style.spacing.scroll.clone();
+        scroll.bar_width = 12.0;
+        scroll.handle_min_length = 40.0;
+        scroll.floating = false;
+        style.spacing.scroll = scroll;
 
         ctx.set_style(style);
 
@@ -662,6 +723,7 @@ impl eframe::App for ShadyApp {
             .resizable(true)
             .default_width(380.0)
             .min_width(280.0)
+            .show_separator_line(true)
             .frame(
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgb(17, 17, 21))
@@ -669,7 +731,7 @@ impl eframe::App for ShadyApp {
                         left: 12,
                         right: 12,
                         top: 12,
-                        bottom: 0,
+                        bottom: 12,
                     })
                     .stroke(egui::Stroke::NONE),
             )
@@ -716,13 +778,7 @@ impl eframe::App for ShadyApp {
                 ui.add_space(8.0);
 
                 // Code editor with custom styling
-                // When there is an error, keep some room below for the error panel
-                let available_height = ui.available_height();
-                let editor_height = if self.last_error.is_some() {
-                    (available_height * 0.6).max(150.0)
-                } else {
-                    available_height
-                };
+                let editor_height = ui.available_height().max(220.0);
                 let editor_frame = egui::Frame::group(ui.style())
                     .fill(egui::Color32::from_rgb(13, 13, 17))
                     .corner_radius(egui::CornerRadius::same(6))
@@ -761,33 +817,6 @@ impl eframe::App for ShadyApp {
                         egui::Stroke::new(1.3, accent),
                         egui::StrokeKind::Inside,
                     );
-                }
-
-                // Error display
-                if let Some(err) = &self.last_error {
-                    ui.add_space(8.0);
-                    egui::Frame::new()
-                        .fill(error_color.linear_multiply(0.15))
-                        .corner_radius(egui::CornerRadius::same(4))
-                        .inner_margin(egui::Margin::same(8))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("⚠")
-                                        .color(error_color)
-                                        .size(12.0),
-                                );
-                                ui.add_space(4.0);
-                                egui::ScrollArea::horizontal().show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new(err)
-                                            .monospace()
-                                            .size(11.0)
-                                            .color(error_color),
-                                    );
-                                });
-                            });
-                        });
                 }
             });
 
@@ -836,33 +865,46 @@ impl eframe::App for ShadyApp {
                                     )),
                                 };
                                 ui.painter().add(callback);
+                            } else if let Some(err) = &self.last_error {
+                                let mut err_ui = ui.new_child(
+                                    egui::UiBuilder::new()
+                                        .max_rect(rect)
+                                        .layout(egui::Layout::top_down(
+                                            egui::Align::Center,
+                                        )),
+                                );
+                                err_ui.painter().rect_filled(
+                                    err_ui.max_rect(),
+                                    8.0,
+                                    error_color.linear_multiply(0.22),
+                                );
+                                egui::ScrollArea::both()
+                                    .auto_shrink([false; 2])
+                                    .show(&mut err_ui, |ui| {
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("⚠ Shader error")
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(
+                                                        255, 220, 220,
+                                                    ))
+                                                    .size(13.0),
+                                            );
+                                            ui.add_space(6.0);
+                                            ui.label(
+                                                egui::RichText::new(err)
+                                                    .monospace()
+                                                    .size(12.0)
+                                                    .color(egui::Color32::from_rgb(
+                                                        250, 200, 200,
+                                                    ))
+                                                    .line_height(Some(16.0)),
+                                            );
+                                        });
+                                    });
                             } else {
-                                let bg = if self.last_error.is_some() {
-                                    error_color.linear_multiply(0.25)
-                                } else {
-                                    egui::Color32::BLACK
-                                };
-
-                                let painter = ui.painter();
-                                painter.rect_filled(rect, 8.0, bg);
-
-                                if let Some(err) = &self.last_error {
-                                    let summary = err
-                                        .lines()
-                                        .next()
-                                        .unwrap_or("Shader compile error");
-
-                                    painter.text(
-                                        rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        summary,
-                                        egui::FontId::new(
-                                            12.0,
-                                            egui::FontFamily::Monospace,
-                                        ),
-                                        egui::Color32::from_rgb(250, 250, 250),
-                                    );
-                                }
+                                ui.painter()
+                                    .rect_filled(rect, 8.0, egui::Color32::BLACK);
                             }
                         });
                 });
