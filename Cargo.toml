@@ -7,6 +7,7 @@ edition = "2021"
 eframe = "0.33"
 gif = "0.14"
 egui_code_editor = "0.2.20"
+	rfd = "0.14"
 
 [build-dependencies]
 winres = "0.1"

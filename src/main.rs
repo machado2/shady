@@ -1,5 +1,6 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufWriter;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,13 +8,25 @@ use eframe::{egui, egui_glow, glow};
 use egui::mutex::Mutex;
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 use gif::{Encoder as GifEncoder, Frame as GifFrame, Repeat};
+use rfd::FileDialog;
 
-const DEFAULT_SNIPPET: &str = r"// Simple radial swirl
-vec2 uv = (FC - r * vec2(0.7, 0.5)) / r.y * 2.0;
-float d = length(uv);
-float angle = atan(uv.y, uv.x);
-float v = 0.5 + 0.5 * sin(8.0 * d - 2.0 * t + 4.0 * angle);
-o = vec4(vec3(v), 1.0);";
+const DEFAULT_SNIPPET: &str = r"// Colorful warped waves
+vec2 uv = FC.xy / r.xy;
+uv.x *= r.x / r.y;
+
+float time = t * 0.5;
+
+for (float i = 1.0; i < 4.0; i++) {
+    uv.x += 0.6 / i * cos(i * 2.5 * uv.y + time);
+    uv.y += 0.6 / i * cos(i * 1.5 * uv.x + time);
+}
+
+vec3 color = vec3(0.0);
+color.r = 0.5 + 0.5 * sin(uv.x + time);
+color.g = 0.5 + 0.5 * sin(uv.y + time + 2.0);
+color.b = 0.5 + 0.5 * sin(uv.x + uv.y + time + 4.0);
+
+o = vec4(color, 1.0);";
 
 struct ShaderState {
     program: glow::Program,
@@ -263,6 +276,8 @@ struct ShadyApp {
     start_time: Instant,
     needs_recompile: bool,
     gif_export: Option<GifExportState>,
+    current_file: Option<PathBuf>,
+    is_dirty: bool,
 }
 
 impl ShadyApp {
@@ -352,6 +367,8 @@ impl ShadyApp {
             start_time: Instant::now(),
             needs_recompile: true,
             gif_export: None,
+            current_file: None,
+            is_dirty: false,
         };
 
         this.recompile();
@@ -365,6 +382,7 @@ impl ShadyApp {
                 self.last_error = None;
             }
             Err(err) => {
+                self.shader = None;
                 self.last_error = Some(err);
             }
         }
@@ -528,7 +546,7 @@ impl eframe::App for ShadyApp {
 
                     // Export button
                     let export_btn = egui::Button::new(
-                        egui::RichText::new("⬇ Export GIF").size(12.0),
+                        egui::RichText::new(" Export GIF").size(12.0),
                     );
                     if ui
                         .add_enabled(self.gif_export.is_none(), export_btn)
@@ -537,15 +555,72 @@ impl eframe::App for ShadyApp {
                         self.start_gif_export();
                     }
 
-                    // Export progress
-                    if let Some(export) = &self.gif_export {
-                        ui.add_space(8.0);
-                        let progress = export.frame_index as f32 / export.frame_count as f32;
-                        ui.add(
-                            egui::ProgressBar::new(progress)
-                                .desired_width(100.0)
-                                .show_percentage(),
-                        );
+                    ui.add_space(16.0);
+
+                    // File open/save
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(" Open").size(12.0),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        if let Some(path) = FileDialog::new()
+                            .add_filter("GLSL", &["glsl", "frag"])
+                            .pick_file()
+                        {
+                            match fs::read_to_string(&path) {
+                                Ok(contents) => {
+                                    self.snippet = contents;
+                                    self.current_file = Some(path);
+                                    self.is_dirty = false;
+                                    self.needs_recompile = true;
+                                    self.last_error = None;
+                                }
+                                Err(e) => {
+                                    self.last_error =
+                                        Some(format!("Failed to load file: {e}"));
+                                }
+                            }
+                        }
+                    }
+
+                    let save_label = if self.current_file.is_some() {
+                        " Save"
+                    } else {
+                        " Save As"
+                    };
+                    if ui
+                        .add_enabled(
+                            !self.snippet.is_empty(),
+                            egui::Button::new(
+                                egui::RichText::new(save_label).size(12.0),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        let target_path = if let Some(path) = &self.current_file {
+                            Some(path.clone())
+                        } else {
+                            FileDialog::new()
+                                .set_file_name("shader.glsl")
+                                .add_filter("GLSL", &["glsl", "frag"])
+                                .save_file()
+                        };
+
+                        if let Some(path) = target_path {
+                            match fs::write(&path, &self.snippet) {
+                                Ok(()) => {
+                                    self.current_file = Some(path);
+                                    self.is_dirty = false;
+                                }
+                                Err(e) => {
+                                    self.last_error =
+                                        Some(format!("Failed to save file: {e}"));
+                                }
+                            }
+                        }
                     }
 
                     // Right side: time display + reset
@@ -601,17 +676,37 @@ impl eframe::App for ShadyApp {
             .show(ctx, |ui| {
                 // Minimal header with hint on hover
                 ui.horizontal(|ui| {
+                    let file_name = self
+                        .current_file
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("untitled.glsl");
+                    let mut label = file_name.to_owned();
+                    if self.is_dirty {
+                        label.push_str("  modified");
+                    }
                     ui.label(
-                        egui::RichText::new("GLSL")
+                        egui::RichText::new(label)
+                            .monospace()
                             .size(11.0)
-                            .color(egui::Color32::from_rgb(140, 140, 160)),
-                    ).on_hover_text("Output: o (vec4)\nInputs: FC (fragCoord), r (resolution), t (time)");
+                            .color(egui::Color32::from_rgb(180, 180, 200)),
+                    );
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             egui::RichText::new("o: vec4 • FC, r, t")
                                 .size(10.0)
                                 .color(egui::Color32::from_rgb(90, 90, 110)),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("GLSL")
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(140, 140, 160)),
+                        )
+                        .on_hover_text(
+                            "Output: o (vec4)\nInputs: FC (fragCoord), r (resolution), t (time)",
                         );
                     });
                 });
@@ -620,8 +715,14 @@ impl eframe::App for ShadyApp {
                 ui.separator();
                 ui.add_space(8.0);
 
-                // Code editor with custom styling: group frame fills remaining height
-                let editor_height = ui.available_height();
+                // Code editor with custom styling
+                // When there is an error, keep some room below for the error panel
+                let available_height = ui.available_height();
+                let editor_height = if self.last_error.is_some() {
+                    (available_height * 0.6).max(150.0)
+                } else {
+                    available_height
+                };
                 let editor_frame = egui::Frame::group(ui.style())
                     .fill(egui::Color32::from_rgb(13, 13, 17))
                     .corner_radius(egui::CornerRadius::same(6))
@@ -644,6 +745,7 @@ impl eframe::App for ShadyApp {
 
                         if self.snippet != before {
                             self.needs_recompile = true;
+                            self.is_dirty = true;
                         }
 
                         response
@@ -735,8 +837,32 @@ impl eframe::App for ShadyApp {
                                 };
                                 ui.painter().add(callback);
                             } else {
-                                ui.painter()
-                                    .rect_filled(rect, 8.0, egui::Color32::BLACK);
+                                let bg = if self.last_error.is_some() {
+                                    error_color.linear_multiply(0.25)
+                                } else {
+                                    egui::Color32::BLACK
+                                };
+
+                                let painter = ui.painter();
+                                painter.rect_filled(rect, 8.0, bg);
+
+                                if let Some(err) = &self.last_error {
+                                    let summary = err
+                                        .lines()
+                                        .next()
+                                        .unwrap_or("Shader compile error");
+
+                                    painter.text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        summary,
+                                        egui::FontId::new(
+                                            12.0,
+                                            egui::FontFamily::Monospace,
+                                        ),
+                                        egui::Color32::from_rgb(250, 250, 250),
+                                    );
+                                }
                             }
                         });
                 });
