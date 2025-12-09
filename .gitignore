@@ -1,0 +1,14 @@
+/target/
+**/*.rs.bk
+**/*~
+**/.DS_Store
+/.idea/
+/.vscode/
+*.pdb
+*.exe.stackdump
+
+# Cargo build artifacts
+cargo-target/
+
+# Rust analyzer / tooling
+/.rustc_info.json
