@@ -1,6 +1,8 @@
+use std::env;
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::PathBuf;
+use std::process;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,6 +33,7 @@ o = vec4(color, 1.0);";
 struct ShaderState {
     program: glow::Program,
     vertex_array: glow::VertexArray,
+    placeholder_texture: glow::Texture,
 }
 
 impl ShaderState {
@@ -76,6 +79,54 @@ impl ShaderState {
 
         let tweet_fragment_source = format!("{shader_version}\n{tweet_fragment_body}");
 
+        // Shadertoy fragment shader variant.
+        let shadertoy_fragment_body = {
+            let body = r#"
+            uniform float iTime;
+            uniform vec3 iResolution;
+            uniform vec4 iMouse;
+            uniform int iFrame;
+            uniform float iChannelTime[4];
+            uniform vec3 iChannelResolution[4];
+            uniform sampler2D iChannel0;
+            uniform sampler2D iChannel1;
+            uniform sampler2D iChannel2;
+            uniform sampler2D iChannel3;
+            uniform vec2 rect_min;
+            out vec4 fragColor;
+
+            // Compatibility shim: some Shadertoy shaders sample 3D/4D coords
+            // even when the channel is a 2D sampler. Drop extra components so they
+            // still compile. Provide overloads that forward to textureLod.
+            vec4 texture(sampler2D tex, vec3 uvw) { return textureLod(tex, uvw.xy, 0.0); }
+            vec4 texture(sampler2D tex, vec4 uvw) { return textureLod(tex, uvw.xy, 0.0); }
+
+            void mainImage(out vec4 fragColor, in vec2 fragCoord);
+
+            void main() {
+                vec4 color = vec4(0.0);
+                mainImage(color, gl_FragCoord.xy - rect_min);
+                fragColor = color;
+            }
+        "#;
+            format!("{precision_line}\n{body}")
+        };
+
+        // Preprocess the snippet for Shadertoy mode to avoid conflicts between
+        // rgb/grgb macros and .rgb/.grb swizzles on some drivers. We rename the
+        // macros and all of their call sites, but leave swizzles untouched.
+        let shadertoy_snippet = {
+            let mut s = snippet.to_owned();
+            s = s.replace("#define rgb(", "#define rgbx(");
+            s = s.replace("rgb(", "rgbx(");
+            s = s.replace("#define grgb(", "#define grgbx(");
+            s = s.replace("grgb(", "grgbx(");
+            s
+        };
+
+        let shadertoy_fragment_source =
+            format!("{shader_version}\n{shadertoy_fragment_body}\n{shadertoy_snippet}");
+
         // Full GLSL fragment shader variant.
         let full_fragment_source = if snippet.contains("#version") {
             snippet.to_owned()
@@ -85,10 +136,15 @@ impl ShaderState {
             format!("{shader_version}\n{precision_line}\n{snippet}")
         };
 
-        // Heuristic: if the snippet looks like a complete GLSL shader (has
-        // `void main`, `#version`, or explicit outputs), try full mode first;
-        // otherwise prefer tweet mode first. On failure, fall back to the other
-        // mode.
+        // Heuristic: if the snippet looks like a Shadertoy shader (has
+        // `mainImage` or `iTime`/`iResolution`), try Shadertoy mode first.
+        // Otherwise, if it looks like a complete GLSL shader (has `void main`,
+        // `#version`, or explicit outputs), try full mode first; otherwise
+        // prefer tweet mode first. On failure, fall back to the other modes.
+        let looks_like_shadertoy = {
+            let s = snippet;
+            s.contains("mainImage") || s.contains("iTime") || s.contains("iResolution")
+        };
         let looks_like_full = {
             let s = snippet;
             s.contains("void main")
@@ -98,37 +154,105 @@ impl ShaderState {
         };
 
         unsafe {
-            if looks_like_full {
-                match Self::create_program(gl, &vertex_shader_source, &full_fragment_source) {
-                    Ok(state) => Ok(state),
-                    Err(full_err) => match Self::create_program(
-                        gl,
-                        &vertex_shader_source,
-                        &tweet_fragment_source,
-                    ) {
-                        Ok(state) => Ok(state),
-                        Err(tweet_err) => Err(format!(
-                            "Full GLSL mode failed:\n{}\n\nTweet shader mode also failed:\n{}",
-                            full_err, tweet_err
-                        )),
-                    },
-                }
+            let try_shadertoy = || {
+                Self::create_program(gl, &vertex_shader_source, &shadertoy_fragment_source)
+            };
+            let try_full = || Self::create_program(gl, &vertex_shader_source, &full_fragment_source);
+            let try_tweet =
+                || Self::create_program(gl, &vertex_shader_source, &tweet_fragment_source);
+
+            let result = if looks_like_shadertoy {
+                try_shadertoy()
+                    .or_else(|shadertoy_err| {
+                        try_full().or_else(|full_err| {
+                            try_tweet().map_err(|tweet_err| {
+                                format!(
+                                    "Shadertoy mode failed:\n{}\n\nFull GLSL mode also failed:\n{}\n\nTweet shader mode also failed:\n{}",
+                                    shadertoy_err, full_err, tweet_err
+                                )
+                            })
+                        })
+                    })
+            } else if looks_like_full {
+                try_full().or_else(|full_err| {
+                    try_shadertoy().or_else(|shadertoy_err| {
+                        try_tweet().map_err(|tweet_err| {
+                            format!(
+                                "Full GLSL mode failed:\n{}\n\nShadertoy mode also failed:\n{}\n\nTweet shader mode also failed:\n{}",
+                                full_err, shadertoy_err, tweet_err
+                            )
+                        })
+                    })
+                })
             } else {
-                match Self::create_program(gl, &vertex_shader_source, &tweet_fragment_source) {
-                    Ok(state) => Ok(state),
-                    Err(tweet_err) => match Self::create_program(
-                        gl,
-                        &vertex_shader_source,
-                        &full_fragment_source,
-                    ) {
-                        Ok(state) => Ok(state),
-                        Err(full_err) => Err(format!(
-                            "Tweet shader mode failed:\n{}\n\nFull GLSL mode also failed:\n{}",
-                            tweet_err, full_err
-                        )),
-                    },
+                try_tweet().or_else(|tweet_err| {
+                    try_shadertoy().or_else(|shadertoy_err| {
+                        try_full().map_err(|full_err| {
+                            format!(
+                                "Tweet shader mode failed:\n{}\n\nShadertoy mode also failed:\n{}\n\nFull GLSL mode also failed:\n{}",
+                                tweet_err, shadertoy_err, full_err
+                            )
+                        })
+                    })
+                })
+            }?;
+
+            // Create a small procedural noise texture for iChannel* uniforms.
+            let placeholder_texture = {
+                use glow::HasContext as _;
+                let tex = gl
+                    .create_texture()
+                    .map_err(|e| format!("Cannot create texture: {e}"))?;
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+
+                let size: i32 = 64;
+                let mut data = vec![0u8; (size * size * 4) as usize];
+                for y in 0..size {
+                    for x in 0..size {
+                        let idx = ((y * size + x) * 4) as usize;
+                        let mut seed = (x as u32)
+                            .wrapping_mul(1973)
+                            ^ (y as u32).wrapping_mul(9277)
+                            ^ 0x7feb_352d;
+                        seed = seed.wrapping_mul(0x27d4_eb2d);
+                        let v = (seed >> 24) as u8;
+                        data[idx] = v;
+                        data[idx + 1] = v;
+                        data[idx + 2] = v;
+                        data[idx + 3] = 255;
+                    }
                 }
-            }
+
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    size,
+                    size,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&data)),
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST as i32,
+                );
+                gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::NEAREST as i32,
+                );
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                tex
+            };
+
+            Ok(Self {
+                program: result.program,
+                vertex_array: result.vertex_array,
+                placeholder_texture,
+            })
         }
     }
 
@@ -174,7 +298,7 @@ impl ShaderState {
             .create_vertex_array()
             .map_err(|e| format!("Cannot create vertex array: {e}"))?;
 
-        Ok(Self { program, vertex_array })
+        Ok(Self { program, vertex_array, placeholder_texture: gl.create_texture().unwrap() })
     }
 
     fn paint(
@@ -183,6 +307,7 @@ impl ShaderState {
         time: f32,
         rect_min: egui::Pos2,
         resolution: egui::Vec2,
+        mouse_pos: Option<egui::Vec2>,
     ) {
         use glow::HasContext as _;
         unsafe {
@@ -199,6 +324,59 @@ impl ShaderState {
             }
             if let Some(loc) = gl.get_uniform_location(self.program, "rect_min") {
                 gl.uniform_2_f32(Some(&loc), rect_min.x, rect_min.y);
+            }
+
+            // Shadertoy uniforms
+            if let Some(loc) = gl.get_uniform_location(self.program, "iTime") {
+                gl.uniform_1_f32(Some(&loc), time);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.program, "iResolution") {
+                gl.uniform_3_f32(Some(&loc), resolution.x, resolution.y, 1.0);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.program, "iMouse") {
+                let (x, y, z, w) = if let Some(mouse) = mouse_pos {
+                    let mx = mouse.x;
+                    let my = resolution.y - mouse.y;
+                    (mx, my, mx, my)
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                };
+                gl.uniform_4_f32(Some(&loc), x, y, z, w);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.program, "iFrame") {
+                let frame = (time * 60.0).floor() as i32;
+                gl.uniform_1_i32(Some(&loc), frame);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.program, "iChannelTime") {
+                gl.uniform_1_f32_slice(Some(&loc), &[time, time, time, time]);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.program, "iChannelResolution") {
+                let data = [
+                    resolution.x,
+                    resolution.y,
+                    1.0,
+                    resolution.x,
+                    resolution.y,
+                    1.0,
+                    resolution.x,
+                    resolution.y,
+                    1.0,
+                    resolution.x,
+                    resolution.y,
+                    1.0,
+                ];
+                gl.uniform_3_f32_slice(Some(&loc), &data);
+            }
+            // Bind placeholder textures for iChannel0-3
+            for (i, name) in ["iChannel0", "iChannel1", "iChannel2", "iChannel3"]
+                .iter()
+                .enumerate()
+            {
+                gl.active_texture(glow::TEXTURE0 + i as u32);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.placeholder_texture));
+                if let Some(loc) = gl.get_uniform_location(self.program, name) {
+                    gl.uniform_1_i32(Some(&loc), i as i32);
+                }
             }
 
             gl.bind_vertex_array(Some(self.vertex_array));
@@ -270,6 +448,7 @@ impl ShaderState {
                 time,
                 egui::Pos2::new(0.0, 0.0),
                 egui::vec2(width as f32, height as f32),
+                None,
             );
 
             let mut pixels = vec![0u8; (width * height * 4) as usize];
@@ -290,6 +469,48 @@ impl ShaderState {
 
             Ok(pixels)
         }
+    }
+}
+
+struct CliCompileApp {
+    gl: Arc<glow::Context>,
+    snippet: String,
+    result: Arc<Mutex<Option<String>>>,
+    compiled: bool,
+}
+
+impl CliCompileApp {
+    fn new(cc: &eframe::CreationContext<'_>, snippet: String, result: Arc<Mutex<Option<String>>>) -> Self {
+        let gl = cc
+            .gl
+            .as_ref()
+            .expect("You need to run eframe with the glow backend")
+            .clone();
+
+        Self {
+            gl,
+            snippet,
+            result,
+            compiled: false,
+        }
+    }
+}
+
+impl eframe::App for CliCompileApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.compiled {
+            // Request the window to close once we've already compiled.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        let compile_result = ShaderState::new(&self.gl, &self.snippet);
+        let mut lock = self.result.lock();
+        *lock = compile_result.err();
+        self.compiled = true;
+
+        // Close after first compile attempt so run_native can return.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 
@@ -850,6 +1071,15 @@ impl eframe::App for ShadyApp {
 
                             let time = self.start_time.elapsed().as_secs_f32();
 
+                            let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
+                            let mouse_local = pointer_pos.and_then(|pos| {
+                                if rect.contains(pos) {
+                                    Some(pos - rect.min)
+                                } else {
+                                    None
+                                }
+                            });
+
                             if let Some(shader) = &self.shader {
                                 let shader = shader.clone();
                                 let resolution = rect.size();
@@ -860,7 +1090,9 @@ impl eframe::App for ShadyApp {
                                     callback: Arc::new(egui_glow::CallbackFn::new(
                                         move |_info, painter| {
                                             let gl = painter.gl();
-                                            shader.lock().paint(gl, time, rect_min, resolution);
+                                            shader
+                                                .lock()
+                                                .paint(gl, time, rect_min, resolution, mouse_local);
                                         },
                                     )),
                                 };
@@ -917,6 +1149,58 @@ impl eframe::App for ShadyApp {
 }
 
 fn main() -> eframe::Result<()> {
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    if let Some(path) = args.get(0) {
+        // CLI mode: compile the given file once and print any errors.
+        let source = match fs::read_to_string(path) {
+            Ok(src) => src,
+            Err(e) => {
+                eprintln!("Failed to read file {}: {}", path, e);
+                process::exit(1);
+            }
+        };
+
+        let result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let result_clone = result.clone();
+        let source_clone = source.clone();
+
+        let native_options = eframe::NativeOptions {
+            renderer: eframe::Renderer::Glow,
+            ..Default::default()
+        };
+
+        let run_result = eframe::run_native(
+            "Shady CLI compile",
+            native_options,
+            Box::new(move |cc| {
+                Ok(Box::new(CliCompileApp::new(
+                    cc,
+                    source_clone.clone(),
+                    result_clone.clone(),
+                )))
+            }),
+        );
+
+        match run_result {
+            Err(e) => {
+                eprintln!("Failed to initialize GL context: {}", e);
+                process::exit(1);
+            }
+            Ok(()) => {
+                let lock = result.lock();
+                if let Some(err) = &*lock {
+                    eprintln!("{}", err);
+                    process::exit(1);
+                } else {
+                    // Successful compile.
+                    process::exit(0);
+                }
+            }
+        }
+    }
+
+    // Default GUI mode.
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         ..Default::default()
