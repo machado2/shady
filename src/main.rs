@@ -4,11 +4,12 @@ use std::time::Instant;
 use eframe::{egui, egui_glow, glow};
 use egui::mutex::Mutex;
 
-const DEFAULT_SNIPPET: &str = r"vec2 p=FC.xy*6./r.y;
-for(float i;i++<1e1;i)
-    p+=sin(p.yx*i+i*i+t*i+r)/i;
-o=tanh(.2/tan(p.y+vec4(0.,.1,.3,0.)));
-o*=o;";
+const DEFAULT_SNIPPET: &str = r"// Simple radial swirl
+vec2 uv = (FC - r * vec2(0.7, 0.5)) / r.y * 2.0;
+float d = length(uv);
+float angle = atan(uv.y, uv.x);
+float v = 0.5 + 0.5 * sin(8.0 * d - 2.0 * t + 4.0 * angle);
+o = vec4(vec3(v), 1.0);";
 
 struct ShaderState {
     program: glow::Program,
@@ -45,10 +46,11 @@ impl ShaderState {
             {precision_line}
             uniform vec2 r;
             uniform float t;
+            uniform vec2 rect_min;
             out vec4 fragColor;
 
             void main() {{
-                vec2 FC = gl_FragCoord.xy;
+                vec2 FC = gl_FragCoord.xy - rect_min;
                 vec4 o = vec4(0.0);
                 {snippet}
                 fragColor = o;
@@ -103,7 +105,13 @@ impl ShaderState {
         }
     }
 
-    fn paint(&self, gl: &glow::Context, time: f32, resolution: egui::Vec2) {
+    fn paint(
+        &self,
+        gl: &glow::Context,
+        time: f32,
+        rect_min: egui::Pos2,
+        resolution: egui::Vec2,
+    ) {
         use glow::HasContext as _;
         unsafe {
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
@@ -116,6 +124,9 @@ impl ShaderState {
             }
             if let Some(loc) = gl.get_uniform_location(self.program, "r") {
                 gl.uniform_2_f32(Some(&loc), resolution.x, resolution.y);
+            }
+            if let Some(loc) = gl.get_uniform_location(self.program, "rect_min") {
+                gl.uniform_2_f32(Some(&loc), rect_min.x, rect_min.y);
             }
 
             gl.bind_vertex_array(Some(self.vertex_array));
@@ -193,26 +204,62 @@ impl eframe::App for ShadyApp {
         if self.needs_recompile {
             self.recompile();
         }
+        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Shady");
+                ui.separator();
+                ui.label("GLSL tweet shader playground");
 
-        egui::TopBottomPanel::top("controls").show(ctx, |ui| {
-            ui.heading("Shady - GLSL tweet shader");
+                if self.last_error.is_some() {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::RED, "Shader error");
+                } else if self.needs_recompile {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Recompiling…").italics());
+                }
 
-            ui.label("Paste a GLSL snippet that writes to `o` (vec4), using FC, r, t.");
-
-            let edit = egui::TextEdit::multiline(&mut self.snippet)
-                .desired_rows(6)
-                .hint_text("vec2 p=FC.xy*6./r.y;\nfor(float i;i++<1e1;i)\n    p+=sin(p.yx*i+i*i+t*i+r)/i;\no=tanh(.2/tan(p.y+vec4(0.,.1,.3,0.)));\no*=o;");
-
-            let response = ui.add(edit);
-
-            if response.changed() {
-                self.needs_recompile = true;
-            }
-
-            if let Some(err) = &self.last_error {
-                ui.colored_label(egui::Color32::RED, err);
-            }
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        let secs = self.start_time.elapsed().as_secs_f32();
+                        ui.label(format!("t = {:.1}s", secs));
+                    },
+                );
+            });
         });
+
+        egui::SidePanel::left("code_panel")
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.heading("GLSL snippet");
+                ui.add_space(4.0);
+                ui.label("Writes to `o` (vec4). Vars: FC, r, t.");
+                ui.add_space(6.0);
+
+                egui::Frame::group(ui.style())
+                    .fill(ui.visuals().extreme_bg_color)
+                    .show(ui, |ui| {
+                        ui.set_min_height(ui.available_height());
+
+                        let edit = egui::TextEdit::multiline(&mut self.snippet)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_rows(18)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("// Simple radial swirl\nvec2 uv = (FC - r * vec2(0.7, 0.5)) / r.y * 2.0;\nfloat d = length(uv);\nfloat angle = atan(uv.y, uv.x);\nfloat v = 0.5 + 0.5 * sin(8.0 * d - 2.0 * t + 4.0 * angle);\no = vec4(vec3(v), 1.0);");
+
+                        let response = ui.add(edit);
+
+                        if response.changed() {
+                            self.needs_recompile = true;
+                        }
+
+                        if let Some(err) = &self.last_error {
+                            ui.add_space(4.0);
+                            ui.colored_label(egui::Color32::RED, err);
+                        }
+                    });
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::Frame::canvas(ui.style()).show(ui, |ui| {
@@ -225,13 +272,16 @@ impl eframe::App for ShadyApp {
                 if let Some(shader) = &self.shader {
                     let shader = shader.clone();
                     let resolution = rect.size();
+                    let rect_min = rect.min;
 
                     let callback = egui::PaintCallback {
                         rect,
                         callback: Arc::new(egui_glow::CallbackFn::new(
                             move |_info, painter| {
                                 let gl = painter.gl();
-                                shader.lock().paint(gl, time, resolution);
+                                shader
+                                    .lock()
+                                    .paint(gl, time, rect_min, resolution);
                             },
                         )),
                     };
