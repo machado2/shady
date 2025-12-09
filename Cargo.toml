@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 eframe = "0.33"
+gif = "0.14"
 
 [build-dependencies]
 winres = "0.1"

@@ -6,6 +6,7 @@
 /.vscode/
 *.pdb
 *.exe.stackdump
+*.gif
 
 # Cargo build artifacts
 cargo-target/
