@@ -272,36 +272,74 @@ impl ShadyApp {
             .expect("You need to run eframe with the glow backend")
             .clone();
 
-        // Tweak global egui style for a more polished look.
         let ctx = &cc.egui_ctx;
         let mut style: egui::Style = (*ctx.style()).clone();
 
-        // Typography
+        // Modern typography
         style.text_styles.insert(
             egui::TextStyle::Heading,
-            egui::FontId::new(20.0, egui::FontFamily::Proportional),
+            egui::FontId::new(16.0, egui::FontFamily::Proportional),
         );
         style.text_styles.insert(
             egui::TextStyle::Body,
-            egui::FontId::new(14.0, egui::FontFamily::Proportional),
+            egui::FontId::new(13.0, egui::FontFamily::Proportional),
         );
         style.text_styles.insert(
             egui::TextStyle::Button,
-            egui::FontId::new(14.0, egui::FontFamily::Proportional),
+            egui::FontId::new(13.0, egui::FontFamily::Proportional),
         );
         style.text_styles.insert(
             egui::TextStyle::Monospace,
-            egui::FontId::new(14.0, egui::FontFamily::Monospace),
+            egui::FontId::new(13.0, egui::FontFamily::Monospace),
         );
 
-        // Subtle light theme with softer panel background.
-        let mut visuals = style.visuals.clone();
-        visuals.panel_fill = egui::Color32::from_rgb(247, 248, 252);
-        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgb(220, 224, 235),
-        );
+        // Modern dark theme
+        let mut visuals = egui::Visuals::dark();
+        
+        // Background colors
+        let bg_dark = egui::Color32::from_rgb(17, 17, 21);
+        let bg_medium = egui::Color32::from_rgb(24, 24, 30);
+        let bg_light = egui::Color32::from_rgb(32, 32, 40);
+        let border = egui::Color32::from_rgb(45, 45, 55);
+        let accent = egui::Color32::from_rgb(99, 102, 241); // Indigo
+        let accent_hover = egui::Color32::from_rgb(129, 132, 255);
+        let text_primary = egui::Color32::from_rgb(240, 240, 245);
+        let text_muted = egui::Color32::from_rgb(140, 140, 160);
+        
+        visuals.panel_fill = bg_dark;
+        visuals.window_fill = bg_medium;
+        visuals.extreme_bg_color = bg_medium;
+        visuals.faint_bg_color = bg_light;
+        
+        // Widget styling
+        visuals.widgets.noninteractive.bg_fill = bg_medium;
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text_muted);
+        
+        visuals.widgets.inactive.bg_fill = bg_light;
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text_primary);
+        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+        
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(50, 50, 65);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent);
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, text_primary);
+        visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
+        
+        visuals.widgets.active.bg_fill = accent;
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, accent_hover);
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, text_primary);
+        visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
+        
+        visuals.selection.bg_fill = accent.linear_multiply(0.4);
+        visuals.selection.stroke = egui::Stroke::new(1.0, accent);
+        
+        visuals.window_corner_radius = egui::CornerRadius::same(8);
+        visuals.window_stroke = egui::Stroke::new(1.0, border);
+        
         style.visuals = visuals;
+        style.spacing.button_padding = egui::vec2(12.0, 6.0);
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
 
         ctx.set_style(style);
 
@@ -439,142 +477,209 @@ impl eframe::App for ShadyApp {
         if self.needs_recompile {
             self.recompile();
         }
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            egui::Frame::none()
-                .fill(ui.visuals().panel_fill)
-                .inner_margin(egui::Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new("Shady")
-                                    .heading()
-                                    .strong(),
-                            );
-                            ui.label(
-                                egui::RichText::new("GLSL tweet shader playground")
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                        });
 
-                        ui.add_space(16.0);
+        let accent = egui::Color32::from_rgb(99, 102, 241);
+        let success_color = egui::Color32::from_rgb(34, 197, 94);
+        let error_color = egui::Color32::from_rgb(239, 68, 68);
+        let border_color = egui::Color32::from_rgb(45, 45, 55);
 
-                        if ui.button("Export GIF").clicked() {
-                            self.start_gif_export();
+        // Minimal top toolbar
+        egui::TopBottomPanel::top("top_bar")
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(20, 20, 26))
+                    .inner_margin(egui::Margin::symmetric(16, 10))
+                    .stroke(egui::Stroke::new(1.0, border_color)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    // Logo with accent color
+                    ui.label(
+                        egui::RichText::new("Shady")
+                            .strong()
+                            .size(16.0)
+                            .color(egui::Color32::WHITE),
+                    );
+
+                    ui.add_space(6.0);
+
+                    // Status indicator dot with tooltip
+                    let (status_color, status_tip) = if self.last_error.is_some() {
+                        (error_color, "Shader has errors")
+                    } else if self.gif_export.is_some() {
+                        (accent, "Exporting GIF...")
+                    } else {
+                        (success_color, "Shader compiled")
+                    };
+
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 4.0, status_color);
+                    resp.on_hover_text(status_tip);
+
+                    ui.add_space(12.0);
+
+                    // Export button
+                    let export_btn = egui::Button::new(
+                        egui::RichText::new("⬇ Export GIF").size(12.0),
+                    );
+                    if ui
+                        .add_enabled(self.gif_export.is_none(), export_btn)
+                        .clicked()
+                    {
+                        self.start_gif_export();
+                    }
+
+                    // Export progress
+                    if let Some(export) = &self.gif_export {
+                        ui.add_space(8.0);
+                        let progress = export.frame_index as f32 / export.frame_count as f32;
+                        ui.add(
+                            egui::ProgressBar::new(progress)
+                                .desired_width(100.0)
+                                .show_percentage(),
+                        );
+                    }
+
+                    // Right side: time display + reset
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let secs = self.start_time.elapsed().as_secs_f32();
+
+                        // Reset time button
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new("↺").size(14.0),
+                            ))
+                            .on_hover_text("Reset time")
+                            .clicked()
+                        {
+                            self.start_time = Instant::now();
                         }
 
-                        if let Some(export) = &self.gif_export {
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "Exporting GIF: {}/{}",
-                                    export.frame_index, export.frame_count
-                                ))
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                            );
-                        }
+                        ui.add_space(4.0);
 
-                        if self.last_error.is_some() {
-                            ui.add_space(12.0);
-                            ui.colored_label(
-                                egui::Color32::from_rgb(220, 30, 60),
-                                "Shader error",
-                            );
-                        } else if self.needs_recompile {
-                            ui.add_space(12.0);
-                            ui.label(
-                                egui::RichText::new("Recompiling…")
-                                    .italics()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                        }
+                        ui.label(
+                            egui::RichText::new(format!("{:.1}s", secs))
+                                .monospace()
+                                .size(13.0)
+                                .color(accent),
+                        );
 
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                let secs = self.start_time.elapsed().as_secs_f32();
-                                ui.label(
-                                    egui::RichText::new(format!("t = {:.1}s", secs))
-                                        .monospace()
-                                        .color(ui.visuals().weak_text_color()),
-                                );
-                            },
+                        ui.label(
+                            egui::RichText::new("t =")
+                                .monospace()
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(140, 140, 160)),
                         );
                     });
                 });
-        });
-
-        egui::SidePanel::left("code_panel")
-            .resizable(true)
-            .default_width(420.0)
-            .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("Shader editor")
-                            .heading()
-                            .strong(),
-                    );
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new("Writes to `o` (vec4). Vars: FC, r, t.")
-                            .small()
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                    ui.add_space(8.0);
-
-                    egui::Frame::group(ui.style())
-                        .fill(ui.visuals().extreme_bg_color)
-                        .rounding(egui::Rounding::same(6))
-                        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                        .inner_margin(egui::Margin::symmetric(10, 8))
-                        .show(ui, |ui| {
-                            ui.set_min_height(ui.available_height());
-
-                            let edit = egui::TextEdit::multiline(&mut self.snippet)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_rows(18)
-                                .desired_width(f32::INFINITY);
-
-                            let response = ui.add(edit);
-
-                            if response.changed() {
-                                self.needs_recompile = true;
-                            }
-
-                            if let Some(err) = &self.last_error {
-                                ui.add_space(6.0);
-                                ui.colored_label(egui::Color32::RED, err);
-                            }
-                        });
-                });
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::Frame::canvas(ui.style()).show(ui, |ui| {
-                ui.vertical(|ui| {
+        // Code editor panel
+        egui::SidePanel::left("code_panel")
+            .resizable(true)
+            .default_width(380.0)
+            .min_width(280.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(17, 17, 21))
+                    .inner_margin(egui::Margin::same(12))
+                    .stroke(egui::Stroke::new(1.0, border_color)),
+            )
+            .show(ctx, |ui| {
+                // Minimal header with hint on hover
+                ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("Preview")
-                            .heading()
-                            .strong(),
-                    );
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new("Live shader output")
-                            .small()
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                    ui.add_space(8.0);
+                        egui::RichText::new("GLSL")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(100, 100, 120)),
+                    ).on_hover_text("Output: o (vec4)\nInputs: FC (fragCoord), r (resolution), t (time)");
+                });
 
-                    egui::Frame::group(ui.style())
-                        .fill(egui::Color32::BLACK)
-                        .rounding(egui::Rounding::same(8))
-                        .inner_margin(egui::Margin::symmetric(8, 8))
+                ui.add_space(4.0);
+
+                // Code editor with custom styling
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(13, 13, 17))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        if self.last_error.is_some() {
+                            error_color.linear_multiply(0.5)
+                        } else {
+                            border_color
+                        },
+                    ))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_min_height(ui.available_height() - 40.0);
+
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let edit = egui::TextEdit::multiline(&mut self.snippet)
+                                    .font(egui::TextStyle::Monospace)
+                                    .code_editor()
+                                    .desired_width(f32::INFINITY);
+
+                                let response = ui.add(edit);
+                                if response.changed() {
+                                    self.needs_recompile = true;
+                                }
+                            });
+                    });
+
+                // Error display
+                if let Some(err) = &self.last_error {
+                    ui.add_space(8.0);
+                    egui::Frame::new()
+                        .fill(error_color.linear_multiply(0.15))
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::same(8))
                         .show(ui, |ui| {
-                            let available = ui.available_size();
-                            let side = available.x.min(available.y);
-                            let size = egui::vec2(side, side);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("⚠")
+                                        .color(error_color)
+                                        .size(12.0),
+                                );
+                                ui.add_space(4.0);
+                                egui::ScrollArea::horizontal().show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(err)
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(error_color),
+                                    );
+                                });
+                            });
+                        });
+                }
+            });
+
+        // Preview panel (main area)
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(8, 8, 12))
+                    .inner_margin(egui::Margin::same(0)),
+            )
+            .show(ctx, |ui| {
+                // Full bleed preview - shader fills the panel
+                let available = ui.available_size();
+                let size = available;
+
+                ui.vertical_centered(|ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::BLACK)
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .stroke(egui::Stroke::new(1.0, border_color))
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 4],
+                            blur: 20,
+                            spread: 0,
+                            color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 100),
+                        })
+                        .show(ui, |ui| {
                             let (rect, _response) =
                                 ui.allocate_exact_size(size, egui::Sense::hover());
 
@@ -590,21 +695,18 @@ impl eframe::App for ShadyApp {
                                     callback: Arc::new(egui_glow::CallbackFn::new(
                                         move |_info, painter| {
                                             let gl = painter.gl();
-                                            shader
-                                                .lock()
-                                                .paint(gl, time, rect_min, resolution);
+                                            shader.lock().paint(gl, time, rect_min, resolution);
                                         },
                                     )),
                                 };
                                 ui.painter().add(callback);
                             } else {
                                 ui.painter()
-                                    .rect_filled(rect, 0.0, egui::Color32::BLACK);
+                                    .rect_filled(rect, 8.0, egui::Color32::BLACK);
                             }
                         });
                 });
             });
-        });
 
         self.step_gif_export();
 
