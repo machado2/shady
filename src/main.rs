@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use eframe::{egui, egui_glow, glow};
 use egui::mutex::Mutex;
+use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 use gif::{Encoder as GifEncoder, Frame as GifFrame, Repeat};
 
 const DEFAULT_SNIPPET: &str = r"// Simple radial swirl
@@ -494,14 +495,21 @@ impl eframe::App for ShadyApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     // Logo with accent color
-                    ui.label(
-                        egui::RichText::new("Shady")
-                            .strong()
-                            .size(16.0)
-                            .color(egui::Color32::WHITE),
-                    );
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Shady")
+                                .strong()
+                                .size(16.0)
+                                .color(egui::Color32::WHITE),
+                        );
+                        ui.label(
+                            egui::RichText::new("GLSL tweet shader playground")
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(160, 160, 180)),
+                        );
+                    });
 
-                    ui.add_space(6.0);
+                    ui.add_space(12.0);
 
                     // Status indicator dot with tooltip
                     let (status_color, status_tip) = if self.last_error.is_some() {
@@ -516,7 +524,7 @@ impl eframe::App for ShadyApp {
                     ui.painter().circle_filled(rect.center(), 4.0, status_color);
                     resp.on_hover_text(status_tip);
 
-                    ui.add_space(12.0);
+                    ui.add_space(16.0);
 
                     // Export button
                     let export_btn = egui::Button::new(
@@ -582,8 +590,13 @@ impl eframe::App for ShadyApp {
             .frame(
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgb(17, 17, 21))
-                    .inner_margin(egui::Margin::same(12))
-                    .stroke(egui::Stroke::new(1.0, border_color)),
+                    .inner_margin(egui::Margin {
+                        left: 12,
+                        right: 12,
+                        top: 12,
+                        bottom: 0,
+                    })
+                    .stroke(egui::Stroke::NONE),
             )
             .show(ctx, |ui| {
                 // Minimal header with hint on hover
@@ -591,42 +604,62 @@ impl eframe::App for ShadyApp {
                     ui.label(
                         egui::RichText::new("GLSL")
                             .size(11.0)
-                            .color(egui::Color32::from_rgb(100, 100, 120)),
+                            .color(egui::Color32::from_rgb(140, 140, 160)),
                     ).on_hover_text("Output: o (vec4)\nInputs: FC (fragCoord), r (resolution), t (time)");
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("o: vec4 • FC, r, t")
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(90, 90, 110)),
+                        );
+                    });
                 });
 
-                ui.add_space(4.0);
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(8.0);
 
-                // Code editor with custom styling
-                egui::Frame::new()
+                // Code editor with custom styling: group frame fills remaining height
+                let editor_height = ui.available_height();
+                let editor_frame = egui::Frame::group(ui.style())
                     .fill(egui::Color32::from_rgb(13, 13, 17))
                     .corner_radius(egui::CornerRadius::same(6))
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        if self.last_error.is_some() {
-                            error_color.linear_multiply(0.5)
-                        } else {
-                            border_color
-                        },
-                    ))
+                    .stroke(egui::Stroke::new(1.0, border_color))
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
-                        ui.set_min_height(ui.available_height() - 40.0);
+                        ui.set_min_height(editor_height);
 
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                let edit = egui::TextEdit::multiline(&mut self.snippet)
-                                    .font(egui::TextStyle::Monospace)
-                                    .code_editor()
-                                    .desired_width(f32::INFINITY);
+                        let before = self.snippet.clone();
 
-                                let response = ui.add(edit);
-                                if response.changed() {
-                                    self.needs_recompile = true;
-                                }
-                            });
+                        let response = CodeEditor::default()
+                            .id_source("shader_code_editor")
+                            .with_rows(18)
+                            .with_fontsize(14.0)
+                            .with_theme(ColorTheme::GRUVBOX)
+                            .with_syntax(Syntax::rust())
+                            .with_numlines(true)
+                            .vscroll(true)
+                            .show(ui, &mut self.snippet);
+
+                        if self.snippet != before {
+                            self.needs_recompile = true;
+                        }
+
+                        response
                     });
+
+                // Custom focus border around the whole editor card
+                if editor_frame.inner.response.has_focus() {
+                    // Draw just inside the frame so it is never clipped on the right
+                    let rect = editor_frame.response.rect.shrink(1.0);
+                    ui.painter().rect_stroke(
+                        rect,
+                        egui::CornerRadius::same(6),
+                        egui::Stroke::new(1.3, accent),
+                        egui::StrokeKind::Inside,
+                    );
+                }
 
                 // Error display
                 if let Some(err) = &self.last_error {
@@ -661,23 +694,24 @@ impl eframe::App for ShadyApp {
             .frame(
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgb(8, 8, 12))
-                    .inner_margin(egui::Margin::same(0)),
+                    .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
                 // Full bleed preview - shader fills the panel
                 let available = ui.available_size();
-                let size = available;
+                let side = (available.x.min(available.y) - 32.0).max(150.0);
+                let size = egui::vec2(side, side);
 
-                ui.vertical_centered(|ui| {
+                ui.centered_and_justified(|ui| {
                     egui::Frame::new()
                         .fill(egui::Color32::BLACK)
-                        .corner_radius(egui::CornerRadius::same(8))
+                        .corner_radius(egui::CornerRadius::same(10))
                         .stroke(egui::Stroke::new(1.0, border_color))
                         .shadow(egui::epaint::Shadow {
                             offset: [0, 4],
-                            blur: 20,
+                            blur: 18,
                             spread: 0,
-                            color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 100),
+                            color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 120),
                         })
                         .show(ui, |ui| {
                             let (rect, _response) =
