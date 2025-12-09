@@ -10,6 +10,10 @@ It opens a window with a live GLSL editor on the left and a real-time shader pre
 - Fullscreen triangle rendering via OpenGL (glow) through `eframe` / `egui_glow`
 - Small, IDE-like UI: code editor panel + preview panel + status bar
 - Built-in example shader (simple radial swirl) with no copyright issues
+- Multiple shader modes detected automatically from the snippet:
+  - Tweet-style body using `FC`, `r`, `t`, and writing to `o`
+  - Shadertoy-style shaders with `mainImage`, `iTime`, `iResolution`, `iMouse`, `iChannel0`...
+  - Full GLSL fragment shaders with your own `void main()`
 - Uniforms wired for tweet-style snippets:
   - `FC`   – `vec2`: fragment coordinates relative to the preview rect (pixels)
   - `r`    – `vec2`: preview resolution `(width, height)`
@@ -18,7 +22,11 @@ It opens a window with a live GLSL editor on the left and a real-time shader pre
 
 ## How it works
 
-Internally, Shady wraps your snippet into a complete fragment shader and compiles it on the GPU:
+Internally, Shady wraps your snippet into a complete fragment shader and compiles it on the GPU.
+
+### Tweet-style mode
+
+If the snippet looks like a tweet shader (no `void main`, uses `FC`, `r`, `t` and writes to `o`), Shady wraps it like this:
 
 ```glsl
 #version 330 core
@@ -39,11 +47,44 @@ void main() {
 }
 ```
 
-The vertex shader renders a fullscreen triangle that covers the preview area.
+### Shadertoy-style mode
+
+If the snippet looks like a Shadertoy shader (mentions `mainImage`, `iTime`, or `iResolution`), Shady wraps it with a Shadertoy-like environment:
+
+- Uniforms provided:
+  - `iTime` – `float`: time in seconds
+  - `iResolution` – `vec3`: `(width, height, 1.0)` of the preview rect
+  - `iMouse` – `vec4`: mouse position over the preview (x, y, x, y) in pixels, or zero when not hovering
+  - `iFrame` – `int`: approximate frame index (`floor(iTime * 60.0)`)
+  - `iChannelTime[4]` – per-channel time (all set to `iTime`)
+  - `iChannelResolution[4]` – per-channel resolutions (each `(width, height, 1.0)`)
+  - `iChannel0..3` – `sampler2D` bound to a small built-in noise texture
+
+Shady expects your snippet to define:
+
+```glsl
+void mainImage(out vec4 fragColor, in vec2 fragCoord);
+```
+
+and calls it from `main` with `fragCoord` local to the preview rect:
+
+```glsl
+void main() {
+    vec4 color = vec4(0.0);
+    mainImage(color, gl_FragCoord.xy - rect_min);
+    fragColor = color;
+}
+```
+
+### Full GLSL mode
+
+If the snippet already looks like a complete GLSL fragment shader (has `void main`, `#version`, `gl_FragColor`, or an `out vec4`), Shady tries to compile it as-is with minimal changes.
+
+The vertex shader in all modes renders a fullscreen triangle that covers the preview area.
 
 ## Example snippet
 
-The built-in default is a small original radial swirl:
+One example shader is a small original radial swirl:
 
 ```glsl
 // Simple radial swirl
@@ -69,7 +110,21 @@ Then from the project root:
 cargo run
 ```
 
-This will build and launch the app. The window title is `Shady - GLSL tweet shader`.
+This will build and launch the GUI app. The window title is `Shady - GLSL tweet shader`.
+
+### CLI compile helper
+
+Shady can also be used as a one-off shader compile checker. From the project root:
+
+```bash
+cargo run -- path/to/shader.glsl
+```
+
+This will compile the given file once, print any GLSL errors to stderr, and exit with a non-zero status on failure.
+
+### GIF export
+
+From the GUI, use the **Export GIF** button in the top bar to render a short animation of the current shader to `shady_export.gif` in the project directory.
 
 ## Windows DPI manifest
 
@@ -88,7 +143,6 @@ This helps avoid odd scaling/"locking" behavior when moving the window between m
 - `Cargo.toml`        – Rust crate configuration
 - `build.rs`          – build script that embeds the Windows manifest with `winres`
 - `shady.manifest`    – Windows application manifest (DPI settings)
-- `shady.rc`          – resource script pointing at the manifest
 - `.gitignore`        – ignores `target/` and common local/tooling files
 
 ## License / reuse
